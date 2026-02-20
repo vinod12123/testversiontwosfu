@@ -105,6 +105,25 @@ class RNNoiseProcessor {
         this.initializeDependencies();
     }
 
+    /**
+     * Check if AudioWorklet and WebAssembly are supported.
+     * Mobile browsers may lack AudioWorklet or restrict synchronous WASM compilation.
+     * @returns {boolean}
+     */
+    static isSupported() {
+        try {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            const hasAudioWorklet = AudioCtx && 'audioWorklet' in AudioCtx.prototype;
+            const hasWebAssembly =
+                typeof WebAssembly === 'object' &&
+                typeof WebAssembly.Module === 'function' &&
+                typeof WebAssembly.Instance === 'function';
+            return !!(hasAudioWorklet && hasWebAssembly);
+        } catch (e) {
+            return false;
+        }
+    }
+
     initializeUI() {
         this.elements = {
             labelNoiseSuppression: document.getElementById('labelNoiseSuppression'),
@@ -112,15 +131,16 @@ class RNNoiseProcessor {
         };
 
         this.elements.switchNoiseSuppression.onchange = (e) => {
-            localStorageSettings.mic_noise_suppression = e.currentTarget.checked;
+            const enabled = e.currentTarget.checked;
+            localStorageSettings.mic_noise_suppression = enabled;
             lS.setSettings(localStorageSettings);
             userLog(
-                localStorageSettings.mic_noise_suppression ? 'success' : 'info',
-                `Noise suppression ${localStorageSettings.mic_noise_suppression ? 'enabled' : 'disabled'}`,
+                enabled ? 'success' : 'info',
+                `Noise suppression ${enabled ? 'enabled' : 'disabled'}`,
                 'top-end',
                 3000
             );
-            this.toggleNoiseSuppression();
+            this.setNoiseSuppression(enabled);
         };
     }
 
@@ -141,15 +161,24 @@ class RNNoiseProcessor {
         try {
             this.uiManager.updateStatus('🎤 Starting audio processing...', 'info');
 
-            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            if (!RNNoiseProcessor.isSupported()) {
+                this.uiManager.updateStatus(
+                    '⚠️ AudioWorklet or WebAssembly not supported, skipping RNNoise',
+                    'warning'
+                );
+                return null;
+            }
+
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
             const sampleRate = this.audioContext.sampleRate;
             this.uiManager.updateStatus(`🎵 Audio context created with sample rate: ${sampleRate}Hz`, 'info');
 
             if (this.audioContext.state === 'suspended') {
                 try {
                     await this.audioContext.resume();
+                    this.uiManager.updateStatus('🎵 AudioContext resumed after suspend', 'info');
                 } catch (e) {
-                    // ignore
+                    this.uiManager.updateStatus('⚠️ AudioContext could not be resumed: ' + e.message, 'warning');
                 }
             }
 
@@ -191,6 +220,11 @@ class RNNoiseProcessor {
     stopProcessing() {
         this.mediaStream = null;
 
+        // Signal the worklet to free WASM memory before disconnecting
+        try {
+            this.workletNode?.port?.postMessage({ type: 'destroy' });
+        } catch (e) {}
+
         try {
             this.sourceNode?.disconnect();
         } catch (e) {}
@@ -216,8 +250,8 @@ class RNNoiseProcessor {
         this.uiManager.updateStatus('🛑 Audio processing stopped', 'info');
     }
 
-    toggleNoiseSuppression() {
-        this.noiseSuppressionEnabled = !this.noiseSuppressionEnabled;
+    setNoiseSuppression(enabled) {
+        this.noiseSuppressionEnabled = enabled;
 
         if (this.workletNode) {
             this.workletNode.port.postMessage({
@@ -231,5 +265,9 @@ class RNNoiseProcessor {
             : this.uiManager.updateStatus('🔇 RNNoise disabled - audio passes through unchanged', 'info');
 
         this.uiManager.updateUI(this.isProcessing, this.noiseSuppressionEnabled);
+    }
+
+    toggleNoiseSuppression() {
+        this.setNoiseSuppression(!this.noiseSuppressionEnabled);
     }
 }
